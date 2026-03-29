@@ -26,7 +26,7 @@ Web cache poisoning injects malicious content into a cache so that it is served 
 - `X-Forwarded-For`, `X-Real-IP`, `X-Original-URL`
 - `X-Forwarded-Proto`, `X-Forwarded-Scheme`
 - `Origin` (when CORS response is cached)
-- `Accept-Language`, `Accept-Encoding` (fat GET)
+- `Accept-Language`, `Accept-Encoding` (unkeyed content-negotiation headers)
 - UTM parameters, tracking query params excluded from cache key
 - HTTP/2 pseudo-headers when downgraded
 
@@ -61,7 +61,7 @@ X-Host: canary.attacker.com
 X-Forwarded-For: canary
 X-Original-URL: /attacker-path
 X-Rewrite-URL: /attacker-path
-X-Forwarded-Proto: https://canary
+X-Forwarded-Proto: x-canary
 Accept-Language: en-<script>alert(1)</script>
 ```
 
@@ -143,9 +143,10 @@ Origin generates CORS headers based on the `Origin` request header. CDN caches t
 ```http
 Origin: https://evil.com
 → Access-Control-Allow-Origin: https://evil.com
+   Access-Control-Allow-Credentials: true
    (cached without Origin in cache key)
 ```
-All users receive `ACAO: https://evil.com`, enabling cross-origin data reads.
+All users receive `ACAO: https://evil.com`. For this to enable cross-origin data reads, `Access-Control-Allow-Credentials: true` must also be present in the cached response (required for cookie-carrying requests). Without `ACAC: true`, only non-credentialed resources are exposed. Confirm both headers are cached before reporting exploitability.
 
 ### Web Cache Deception
 
